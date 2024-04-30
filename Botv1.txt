@@ -227,4 +227,170 @@ int main() {
 ---------------------------------------------------------------------------------------------------------------------------------
 
 
+#include <iostream>
+#include <cstdlib>
+#include <ctime>
+#include <set>
+#include <queue>
+#include <map>
+#include <vector>
+#include <algorithm>
+#include "hlt.hpp"
+#include "networking.hpp"
 
+bool isEdge(hlt::GameMap &map, const hlt::Location &loc, unsigned char myID) {
+    for (const auto &dir : CARDINALS) {
+        if (map.getSite(map.getLocation(loc, dir)).owner != myID)
+            return true;
+    }
+    return false;
+}
+
+bool isNearEnemy(hlt::GameMap &map, const hlt::Location &loc, unsigned char myID) {
+    for (const auto &dir : CARDINALS) {
+        if (map.getSite(map.getLocation(loc, dir)).owner != 0 && map.getSite(map.getLocation(loc, dir)).owner != myID) {
+            return true;
+        }
+    }
+    return false;
+}
+
+double getScore(const hlt::Site &site) {
+    return 5 * site.production - 0.7 * site.strength + 50;
+}
+
+hlt::Move selectBestMove(hlt::GameMap &map, const hlt::Location &loc, const std::vector<hlt::Move> &possibleMoves) {
+    return *std::max_element(possibleMoves.begin(), possibleMoves.end(), [&](const hlt::Move &a, const hlt::Move &b) {
+        auto siteA = map.getSite(a.loc);
+        auto siteB = map.getSite(b.loc);
+        int overkillA = std::max(0, siteA.strength - siteB.strength);
+        int overkillB = std::max(0, siteB.strength - siteA.strength);
+        return (overkillA + siteA.production) < (overkillB + siteB.production); 
+    });
+}
+
+unsigned char getDirectionTowards(const hlt::GameMap& map, const hlt::Location& source, const hlt::Location& target) {
+    int dx = target.x - source.x;
+    int dy = target.y - source.y;
+
+    // Adjust for wraparound
+    if (dx > map.width / 2) dx -= map.width;
+    if (-dx > map.width / 2) dx += map.width;
+    if (dy > map.height / 2) dy -= map.height;
+    if (-dy > map.height / 2) dy += map.height;
+
+    // Move in the direction of greatest delta
+    if (abs(dx) > abs(dy)) {
+        return dx > 0 ? EAST : WEST;
+    } else {
+        return dy > 0 ? SOUTH : NORTH;
+    }
+}
+
+int main() {
+    srand(time(NULL));
+    std::cout.sync_with_stdio(false);
+
+    unsigned char myID;
+    hlt::GameMap presentMap;
+    getInit(myID, presentMap);
+    sendInit("MyCPPaaaaBot");
+
+    while (true) {
+        std::set<hlt::Move> moves;
+        getFrame(presentMap);
+
+        std::priority_queue<std::pair<double, hlt::Location>, std::vector<std::pair<double, hlt::Location>>, std::greater<>> edgeQueue;
+        std::map<hlt::Location, int> strengthMap;
+
+        // First pass: Target neutral and enemy sites on the edges
+        for (unsigned short y = 0; y < presentMap.height; ++y) {
+            for (unsigned short x = 0; x < presentMap.width; ++x) {
+                hlt::Location loc = {x, y};
+                const auto& site = presentMap.getSite(loc);
+
+                if (isEdge(presentMap, loc, myID) && site.owner != myID) {
+                    double score = getScore(site);
+                    edgeQueue.push({score, loc});
+                }
+            }
+        }
+
+        // Process edge targets
+        while (!edgeQueue.empty()) {
+            auto current = edgeQueue.top();
+            edgeQueue.pop();
+
+            hlt::Location loc = current.second;
+            const auto& site = presentMap.getSite(loc);
+
+            if (site.owner != myID) {
+                std::vector<hlt::Move> possibleMoves;
+
+                for (unsigned char d : CARDINALS) {
+                    hlt::Location nextLoc = presentMap.getLocation(loc, d);
+                    const auto& nextSite = presentMap.getSite(nextLoc);
+                    if (nextSite.owner == myID && nextSite.strength > site.strength) {
+                        possibleMoves.push_back({nextLoc, d});
+                    }
+                }
+
+                if (!possibleMoves.empty()) {
+                    hlt::Move bestMove = selectBestMove(presentMap, loc, possibleMoves);
+                    moves.insert(bestMove);
+                    strengthMap[presentMap.getLocation(loc, bestMove.dir)] += presentMap.getSite(loc).strength;
+                }
+            }
+        }
+
+        // Second pass: Consolidate strength inside territory
+        for (unsigned short y = 0; y < presentMap.height; ++y) {
+            for (unsigned short x = 0; x < presentMap.width; ++x) {
+                hlt::Location loc = {x, y};
+                const auto& site = presentMap.getSite(loc);
+
+                if (site.owner == myID && strengthMap[loc] == 0) {
+                    if (isNearEnemy(presentMap, loc, myID)) {
+                        moves.insert({loc, STILL});
+                        strengthMap[loc] += site.strength;
+                    } else {
+                        hlt::Location targetLoc;
+                        int targetDistance = presentMap.width + presentMap.height; // Max possible distance
+
+                        // Find closest edge if not near enemy
+                        for (const auto& d : CARDINALS) {
+                            int distance = 0;
+                            hlt::Location currentLoc = loc;
+                            while (distance < targetDistance) {
+                                currentLoc = presentMap.getLocation(currentLoc, d);
+                                const auto& currentSite = presentMap.getSite(currentLoc);
+                                distance++;
+
+                                if (currentSite.owner != myID) {
+                                    targetDistance = distance;
+                                    targetLoc = currentLoc;
+                                    break;
+                                }
+                            }
+                        }
+
+                        // Decide to move or stay STILL based on distance to target
+                        if (targetDistance <= 8) {
+                            unsigned char dirToTarget = getDirectionTowards(presentMap, loc, targetLoc);
+                            moves.insert({loc, dirToTarget}); // Move towards the target
+                        } else {
+                            moves.insert({loc, STILL}); // Otherwise, stay STILL
+                            strengthMap[loc] += site.strength; // Accumulate strength if staying STILL
+                        }
+                    }
+                }
+            }
+        }
+
+        // Convert vector of moves to a set to eliminate duplicates before sending to the game engine
+        std::set<hlt::Move> uniqueMoves(moves.begin(), moves.end());
+        sendFrame(uniqueMoves);
+    }
+
+    return 0;
+}
