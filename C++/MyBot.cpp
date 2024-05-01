@@ -35,7 +35,7 @@ int main() {
     unsigned char myID;
     hlt::GameMap presentMap;
     getInit(myID, presentMap);
-    sendInit("EnhancedC++Bot");
+    sendInit("Papi");
 
     while (true) {
         std::set<hlt::Move> moves;
